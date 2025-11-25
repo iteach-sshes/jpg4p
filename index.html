@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文件翻拍校正器</title>
+    <script async src="https://docs.opencv.org/4.9.0/opencv.js" onload="onOpenCvReady();"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', 'Microsoft JhengHei', 'Helvetica Neue', sans-serif;
+            background-color: #f0f2f5;
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+            min-height: 100vh;
+        }
+        .container {
+            width: 100%;
+            max-width: 1200px;
+            background: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h1 {
+            color: #1a73e8;
+            margin-top: 0;
+        }
+        .controls {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        button, label.button {
+            background-color: #1a73e8;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s, box-shadow 0.3s;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        button:hover, label.button:hover {
+            background-color: #1558b8;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        }
+        button:disabled {
+            background-color: #a0c3ff;
+            cursor: not-allowed;
+        }
+        input[type="file"] {
+            display: none;
+        }
+        .canvas-container {
+            position: relative;
+            max-width: 100%;
+            margin-bottom: 20px;
+            border: 2px dashed #ccc;
+            border-radius: 8px;
+            overflow: hidden; /* 確保 canvas 不會超出邊框 */
+        }
+        canvas {
+            display: block;
+            max-width: 100%;
+            height: auto;
+        }
+        .status {
+            margin-top: 10px;
+            font-size: 16px;
+            color: #555;
+            height: 24px;
+        }
+        .loader {
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #1a73e8;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            display: none; /* 預設隱藏 */
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .result-container {
+            margin-top: 20px;
+            text-align: center;
+        }
+        #resultCanvas {
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>文件翻拍校正器</h1>
+        <p><b style="color: #1a73e8;">▼JPG 影像任意四點裁切校正工具▼</b><br />➊先按【選擇JPG圖片】選擇有翻拍文件的照片。<br />➋控制藍色圓點對齊照片中文件的四個角落。<br />➌按下【變形校正】。<br />➍校正完成後，請按最下面的【下載儲存】。</p>
+        
+        <div class="controls">
+            <label for="fileInput" class="button">1. 選擇 JPG 圖片</label>
+            <input type="file" id="fileInput" accept="image/jpeg">
+            <button id="transformButton" disabled>2. 變形校正</button>
+        </div>
+
+        <div id="status" class="status">請先載入 OpenCV.js 函式庫...</div>
+        <div id="loader" class="loader"></div>
+        
+        <div class="canvas-container">
+            <canvas id="mainCanvas"></canvas>
+        </div>
+        
+        <div id="resultContainer" class="result-container" style="display:none;">
+            <h2>校正結果預覽</h2>
+            <canvas id="resultCanvas"></canvas>
+            <br>
+            <button id="saveButton" class="button">3. 下載儲存</button>
+        </div>
+		<p>VibeCoding by文華國小資訊組長陳俊源20250615</p>
+    </div>
+    
+    <script>
+        // --- DOM 元素獲取 ---
+        const fileInput = document.getElementById('fileInput');
+        const transformButton = document.getElementById('transformButton');
+        const saveButton = document.getElementById('saveButton');
+        const mainCanvas = document.getElementById('mainCanvas');
+        const resultCanvas = document.getElementById('resultCanvas');
+        const resultContainer = document.getElementById('resultContainer');
+        const statusDiv = document.getElementById('status');
+        const loader = document.getElementById('loader');
+        const ctx = mainCanvas.getContext('2d');
+
+        // --- 狀態變數 ---
+        let cvReady = false;
+        let image = null;
+        let originalWidth, originalHeight;
+        let scaleFactor;
+        
+        // 存儲四個頂點的座標 (相對於 canvas 上的顯示尺寸)
+        let cornerPoints = []; 
+        // 拖曳相關變數
+        let selectedPoint = null;
+        let isDragging = false;
+        
+        const POINT_RADIUS = 10; // 頂點圓圈的半徑
+
+        // --- OpenCV 初始化 ---
+        function onOpenCvReady() {
+            cv['onRuntimeInitialized'] = () => {
+                cvReady = true;
+                statusDiv.textContent = '請選擇一張圖片。';
+                console.log('OpenCV.js is ready.');
+            };
+        }
+
+        // --- 事件監聽 ---
+        fileInput.addEventListener('change', handleFileSelect);
+        transformButton.addEventListener('click', handleTransform);
+        saveButton.addEventListener('click', handleSave);
+
+        mainCanvas.addEventListener('mousedown', handleMouseDown);
+        mainCanvas.addEventListener('mousemove', handleMouseMove);
+        mainCanvas.addEventListener('mouseup', handleMouseUp);
+        mainCanvas.addEventListener('mouseout', handleMouseUp); // 如果滑鼠移出 canvas 也停止拖曳
+
+        // --- 功能函式 ---
+        
+        /**
+         * 處理檔案選擇
+         * @param {Event} e - 檔案輸入事件
+         */
+        function handleFileSelect(e) {
+            const file = e.target.files[0];
+            if (!file || !file.type.startsWith('image/jpeg')) {
+                alert('請選擇一個 JPG 格式的圖片檔案。');
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                image = new Image();
+                image.onload = function() {
+                    originalWidth = image.width;
+                    originalHeight = image.height;
+                    
+                    // 計算縮放比例，使圖片能完整顯示在視窗中
+                    const container = document.querySelector('.canvas-container');
+                    const maxWidth = container.clientWidth;
+                    const maxHeight = window.innerHeight * 0.6; // 限制最大高度為視窗的60%
+                    
+                    scaleFactor = Math.max(maxWidth / originalWidth, maxHeight / originalHeight)/1.5;
+                    
+                    // 設定 canvas 尺寸以匹配縮放後的圖片
+                    mainCanvas.width = originalWidth * scaleFactor;
+                    mainCanvas.height = originalHeight * scaleFactor;
+                    
+                    // 初始化四個頂點到圖片的四個角落
+                    cornerPoints = [
+                        { x: 20, y: 20 },
+                        { x: mainCanvas.width -20, y: 20 },
+                        { x: mainCanvas.width -20, y: mainCanvas.height -20 },
+                        { x: 20, y: mainCanvas.height -20 }
+                    ];
+                    
+                    draw(); // 繪製圖片和頂點
+                    
+                    transformButton.disabled = false;
+                    statusDiv.textContent = '圖片已載入。請拖曳四個角的藍色圓點來框選文件區域。';
+                    resultContainer.style.display = 'none'; // 隱藏上次的結果
+                };
+                image.src = event.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        /**
+         * 主要繪圖函數
+         */
+        function draw() {
+            if (!image) return;
+
+            // 清除畫布
+            ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
+            
+            // 繪製背景圖片
+            ctx.drawImage(image, 0, 0, mainCanvas.width, mainCanvas.height);
+            
+            // 繪製選取的多邊形
+            ctx.beginPath();
+            ctx.moveTo(cornerPoints[0].x, cornerPoints[0].y);
+            for (let i = 1; i < cornerPoints.length; i++) {
+                ctx.lineTo(cornerPoints[i].x, cornerPoints[i].y);
+            }
+            ctx.closePath();
+            
+            ctx.strokeStyle = 'rgba(255, 0, 0, 0.7)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            
+            // 繪製可拖曳的頂點
+            cornerPoints.forEach((point, index) => {
+                ctx.beginPath();
+                ctx.arc(point.x, point.y, POINT_RADIUS, 0, 2 * Math.PI);
+                ctx.fillStyle = 'rgba(26, 115, 232, 0.8)';
+                ctx.fill();
+                ctx.strokeStyle = 'white';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            });
+        }
+        
+        /**
+         * 處理滑鼠按下事件，檢查是否點擊到頂點
+         * @param {MouseEvent} e
+         */
+        function handleMouseDown(e) {
+            if (!image) return;
+            const rect = mainCanvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            for (let i = 0; i < cornerPoints.length; i++) {
+                const point = cornerPoints[i];
+                const dx = mouseX - point.x;
+                const dy = mouseY - point.y;
+                if (dx * dx + dy * dy < POINT_RADIUS * POINT_RADIUS) {
+                    selectedPoint = i;
+                    isDragging = true;
+                    mainCanvas.style.cursor = 'grabbing';
+                    return;
+                }
+            }
+        }
+        
+        /**
+         * 處理滑鼠移動事件，更新頂點位置
+         * @param {MouseEvent} e
+         */
+        function handleMouseMove(e) {
+            const rect = mainCanvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            // 更改滑鼠指標樣式
+            let onPoint = false;
+            for (const point of cornerPoints) {
+                const dx = mouseX - point.x;
+                const dy = mouseY - point.y;
+                if (dx * dx + dy * dy < POINT_RADIUS * POINT_RADIUS) {
+                    onPoint = true;
+                    break;
+                }
+            }
+            mainCanvas.style.cursor = isDragging ? 'grabbing' : (onPoint ? 'grab' : 'default');
+
+            if (!isDragging || selectedPoint === null) return;
+
+            // 更新選定點的座標
+            cornerPoints[selectedPoint].x = Math.max(0, Math.min(mainCanvas.width, mouseX));
+            cornerPoints[selectedPoint].y = Math.max(0, Math.min(mainCanvas.height, mouseY));
+
+            draw(); // 重繪畫布
+        }
+
+        /**
+         * 處理滑鼠放開事件，結束拖曳
+         */
+        function handleMouseUp() {
+            isDragging = false;
+            selectedPoint = null;
+            mainCanvas.style.cursor = 'default';
+        }
+
+        /**
+         * 執行透視變換
+         */
+        function handleTransform() {
+            if (!cvReady || !image) {
+                alert('請先載入圖片並等待 OpenCV.js 就緒。');
+                return;
+            }
+            
+            loader.style.display = 'block';
+            statusDiv.textContent = '正在進行透視校正，請稍候...';
+            transformButton.disabled = true;
+
+            // 使用 setTimeout 讓 UI 先更新，避免畫面卡住
+            setTimeout(() => {
+                try {
+                    // 1. 將 canvas 上的座標轉換回原始圖片的座標
+                    const srcPoints = cornerPoints.map(p => ({
+                        x: p.x / scaleFactor,
+                        y: p.y / scaleFactor
+                    }));
+
+                    // 2. 確定目標矩形的尺寸
+                    // 使用勾股定理計算四邊形的寬和高，以保留最多細節
+                    const widthA = Math.hypot(srcPoints[1].x - srcPoints[0].x, srcPoints[1].y - srcPoints[0].y);
+                    const widthB = Math.hypot(srcPoints[3].x - srcPoints[2].x, srcPoints[3].y - srcPoints[2].y);
+                    const destWidth = Math.max(widthA, widthB);
+
+                    const heightA = Math.hypot(srcPoints[3].x - srcPoints[0].x, srcPoints[3].y - srcPoints[0].y);
+                    const heightB = Math.hypot(srcPoints[2].x - srcPoints[1].x, srcPoints[2].y - srcPoints[1].y);
+                    const destHeight = Math.max(heightA, heightB);
+
+                    // 3. 準備 OpenCV 需要的 Mat 物件
+                    const src = cv.imread(image);
+                    const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+                        srcPoints[0].x, srcPoints[0].y,
+                        srcPoints[1].x, srcPoints[1].y,
+                        srcPoints[2].x, srcPoints[2].y,
+                        srcPoints[3].x, srcPoints[3].y
+                    ]);
+
+                    const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+                        0, 0,
+                        destWidth, 0,
+                        destWidth, destHeight,
+                        0, destHeight
+                    ]);
+
+                    // 4. 計算變換矩陣
+                    const M = cv.getPerspectiveTransform(srcTri, dstTri);
+
+                    // 5. 執行透視變換
+                    const dsize = new cv.Size(destWidth, destHeight);
+                    const dst = new cv.Mat();
+                    cv.warpPerspective(src, dst, M, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
+
+                    // 6. 將結果顯示在 resultCanvas 上
+                    resultCanvas.width = destWidth;
+                    resultCanvas.height = destHeight;
+                    cv.imshow(resultCanvas, dst);
+
+                    // 7. 清理記憶體
+                    src.delete();
+                    dst.delete();
+                    M.delete();
+                    srcTri.delete();
+                    dstTri.delete();
+                    
+                    // 8. 更新 UI
+                    resultContainer.style.display = 'block';
+                    statusDiv.textContent = '校正完成！您可以預覽結果並儲存。';
+
+                } catch (error) {
+                    console.error('執行變換時發生錯誤:', error);
+                    statusDiv.textContent = `發生錯誤: ${error.message}`;
+                    alert(`處理時發生錯誤，請檢查瀏覽器主控台以獲取詳細資訊。\n\n錯誤訊息: ${error.message}`);
+                } finally {
+                    loader.style.display = 'none';
+                    transformButton.disabled = false;
+                }
+            }, 50); // 延遲 50ms 確保 UI 更新
+        }
+
+        /**
+         * 處理存檔事件
+         */
+        function handleSave() {
+            const link = document.createElement('a');
+            link.download = `corrected_${Date.now()}.jpg`;
+            // 使用 toDataURL 將 canvas 內容轉換為高品質的 JPG 格式
+            link.href = resultCanvas.toDataURL('image/jpeg', 0.95); // 1.0 表示最高品質
+            link.click();
+        }
+
+    </script>
+</body>
+</html>
